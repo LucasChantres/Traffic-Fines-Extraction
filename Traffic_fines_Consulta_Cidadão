@@ -1,0 +1,300 @@
+import time
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+import re
+import csv
+
+# === CREDENCIAIS DE LOGIN ===
+LOGIN = "xxxxxxx" #digite seu login
+SENHA = "xxxxxxx" #digite sua senha
+
+# === LISTA DE SITES A PROCESSAR COM NOMES AMIGÁVEIS ===
+SITES = {
+    "https://diadema.consultacidadao.com.br/#": "Diadema",
+    "https://saocaetanodosul.consultacidadao.com.br/#": "Sao Caetano",  
+    "https://maua.mobilidadedigital.com.br/#": "Maua",
+    "https://itapevi.consultacidadao.com.br/#": "Itapevi",
+    "https://santanadeparnaiba.consultacidadao.com.br/#": "Santana de Parnaiba",
+    "https://cotia.consultacidadao.com.br/#": "Cotia"
+    # "https://mogidascruzes.consultacidadao.com.br/#": "Mogi das Cruzes",
+    # "https://caieiras.consultacidadao.com.br/#": "Caieiras"  
+    # #para acrescentar mogi, e caieras remova '#' da frente e ajuste a virgula
+}
+
+# === FUNÇÃO PARA PROCESSAR UM ÚNICO SITE ===
+def processar_site(url, site_name, login, senha):
+    print(f"\n✅ Iniciando processamento do site: {url} ({site_name})")
+
+    # === SETUP DO CHROME ===
+    options = uc.ChromeOptions()
+    options.add_argument("--start-maximized")
+    driver = uc.Chrome(options=options)
+
+
+    try:
+        # === ABRE O SITE ===
+        driver.get(url)
+
+        # === TENTATIVA DE FECHAR POP-UP INICIAL ===
+        try:
+            fechar_popup = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((
+                    By.XPATH, "//a[contains(@class, 'close-modal') or @rel='modal:close']"
+                ))
+            )
+            fechar_popup.click()
+            print("✅ Pop-up inicial fechado.")
+        except Exception as e:
+            print("⚠️ Nenhum pop-up inicial detectado ou erro ao fechar:", e)
+
+        # === CLICA EM "INDICAÇÃO DE CONDUTOR" ===
+        try:
+            bloco = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'card-clickable')]//h1[contains(text(), 'Indicação de Condutor')]"))
+            )
+            bloco.click()
+            print("✅ Bloco 'Indicação de Condutor' clicado.")
+        except Exception as e:
+            print("❌ Erro ao clicar no bloco:", e)
+            return []
+
+        # === AGUARDA MODAL DE LOGIN ===
+        try:
+            login_input = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='text']"))
+            )
+            senha_input = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+
+            login_input.send_keys(login)
+            senha_input.send_keys(senha)
+            print("✅ Login e senha preenchidos.")
+
+            # Clica no botão "Entrar"
+            entrar_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Entrar')]")
+            entrar_btn.click()
+            print("✅ Botão 'Entrar' clicado.")
+        except Exception as e:
+            print("❌ Erro no login:", e)
+            return []
+
+        # === AGUARDA A PÁGINA DE INFRAÇÕES CARREGAR ===
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "panel-placa"))
+            )
+            print("✅ Página de infrações carregada.")
+        except Exception as e:
+            print("❌ Erro ao carregar a página de infrações:", e)
+            return []
+
+        # === ROLA A PÁGINA PARA CARREGAR TODO O CONTEÚDO ===
+        try:
+            last_height = driver.execute_script("return document.body.scrollHeight")
+            while True:
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(3)
+                new_height = driver.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+            print("✅ Rolagem da página concluída.")
+        except Exception as e:
+            print("⚠️ Erro ao rolar a página:", e)
+
+        # === EXTRAI AS PLACAS, AUTOS DE INFRAÇÃO, DATAS E STATUS ===
+        data_to_save = []
+        try:
+            # Captura o HTML da página
+            html_content = driver.page_source
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # Verifica se há uma mensagem de "nenhuma infração"
+            no_data_message = soup.find(string=re.compile(r'Nenhuma infração|Sem infrações|Não há dados', re.IGNORECASE))
+            if no_data_message:
+                print(f"⚠️ Mensagem encontrada: {no_data_message.strip()}")
+                print("Nenhuma infração disponível neste site.")
+                return []
+
+            # Encontra todos os elementos relevantes (placas e containers de autos/datas/status)
+            elements = soup.find_all(['div'], class_=re.compile(r'panel-placa|col-12 col-lg-3 d-flex flex-column align-items-center justify-content-around p-3 gap-3 bg-gray text-center text-dark|col-12 col-lg-9 d-flex flex-column flex-grow-1 p-3 gap-1 bg-white text-dark justify-content-around'))
+            
+            current_placa = None
+            autos_de_infracao = []
+            last_auto = None
+
+            for element in elements:
+                # Verifica se é uma placa
+                if 'panel-placa' in element.get('class', []):
+                    # Se já temos uma placa anterior, salvamos seus autos de infração, datas e status
+                    if current_placa:
+                        if autos_de_infracao:
+                            print(f"✅ Encontrados {len(autos_de_infracao)} autos de infração para a placa {current_placa}.")
+                            for auto, data, status in autos_de_infracao:
+                                data_to_save.append({
+                                    "Site": site_name,
+                                    "Placa": current_placa,
+                                    "Auto de Infração": auto,
+                                    "Data da Infração": data,
+                                    "Status": status
+                                })
+                        else:
+                            print(f"⚠️ Nenhum auto de infração encontrado para a placa {current_placa}.")
+                            data_to_save.append({
+                                "Site": site_name,
+                                "Placa": current_placa,
+                                "Auto de Infração": "Nenhum",
+                                "Data da Infração": "Nenhuma",
+                                "Status": "Nenhum"
+                            })
+
+                    # Extrai a nova placa
+                    placa_text = element.get_text(strip=True)
+                    if "Placa:" not in placa_text:
+                        print(f"⚠️ Placa inválida encontrada: {placa_text}")
+                        continue
+                    current_placa = placa_text.split("Placa:")[1].strip()
+                    print(f"✅ Processando placa: {current_placa}")
+                    autos_de_infracao = []  # Reseta a lista de autos para a nova placa
+                    last_auto = None
+
+                # Verifica se é um container de auto de infração
+                elif 'col-12' in element.get('class', []) and 'col-lg-3' in element.get('class', []):
+                    # Tenta encontrar o auto de infração
+                    auto_label = element.find('p', class_='fs-7 fw-bold', string=re.compile(r'Auto Infração', re.IGNORECASE))
+                    if auto_label:
+                        auto_number = auto_label.find_next('p', class_='fs-5 fw-bold')
+                        if auto_number:
+                            last_auto = auto_number.get_text(strip=True)
+                            # Inicialmente, não temos a data nem o status, então usamos "Nenhuma" e "Nenhum"
+                            if current_placa:
+                                autos_de_infracao.append((last_auto, "Nenhuma", "Nenhum"))
+                                print(f"✅ Auto de infração {last_auto} encontrado. Data inicial: Nenhuma, Status inicial: Nenhum")
+
+                    # Verifica se a data está no mesmo container (Estrutura 1)
+                    data_label = element.find('p', string=re.compile(r'Data da Infração', re.IGNORECASE))
+                    if data_label and last_auto:
+                        next_p = data_label.find_next('p')
+                        if next_p:
+                            text = next_p.get_text(strip=True)
+                            if re.match(r'\d{2}/\d{2}/\d{4}', text):
+                                # Atualiza a data do último auto de infração adicionado
+                                for i, (auto, _, status) in enumerate(autos_de_infracao):
+                                    if auto == last_auto:
+                                        autos_de_infracao[i] = (auto, text, status)
+                                        print(f"✅ Data {text} associada ao auto {auto} (mesmo container)")
+                                        break
+
+                    # Verifica se o status está no mesmo container (Estrutura 1, improvável, mas incluído por completude)
+                    status_label = element.find('p', string=re.compile(r'Status', re.IGNORECASE))
+                    if status_label and last_auto:
+                        next_p = status_label.find_next('p')
+                        if next_p:
+                            status_text = next_p.get_text(strip=True)
+                            # Atualiza o status do último auto de infração adicionado
+                            for i, (auto, data, _) in enumerate(autos_de_infracao):
+                                if auto == last_auto:
+                                    autos_de_infracao[i] = (auto, data, status_text)
+                                    print(f"✅ Status {status_text} associado ao auto {auto} (mesmo container)")
+                                    break
+
+                # Verifica se é um container de data de infração e status
+                elif 'col-12' in element.get('class', []) and 'col-lg-9' in element.get('class', []):
+                    # Tenta encontrar a data da infração
+                    data_label = element.find('p', string=re.compile(r'Data da Infração', re.IGNORECASE))
+                    if data_label and last_auto:
+                        next_p = data_label.find_next('p')
+                        if next_p:
+                            text = next_p.get_text(strip=True)
+                            if re.match(r'\d{2}/\d{2}/\d{4}', text):
+                                # Atualiza a data do último auto de infração adicionado
+                                for i, (auto, _, status) in enumerate(autos_de_infracao):
+                                    if auto == last_auto:
+                                        autos_de_infracao[i] = (auto, text, status)
+                                        print(f"✅ Data {text} associada ao auto {auto} (próximo container)")
+                                        break
+                        else:
+                            print(f"⚠️ Rótulo 'Data da Infração' encontrado, mas próximo <p> não contém data válida. Todos os <p>: {[p.get_text(strip=True) for p in element.find_all('p')]}")
+
+                    # Tenta encontrar o status
+                    status_label = element.find('p', string=re.compile(r'Status', re.IGNORECASE))
+                    if status_label and last_auto:
+                        next_p = status_label.find_next('p')
+                        if next_p:
+                            status_text = next_p.get_text(strip=True)
+                            # Atualiza o status do último auto de infração adicionado
+                            for i, (auto, data, _) in enumerate(autos_de_infracao):
+                                if auto == last_auto:
+                                    autos_de_infracao[i] = (auto, data, status_text)
+                                    print(f"✅ Status {status_text} associado ao auto {auto} (próximo container)")
+                                    break
+                        else:
+                            print(f"⚠️ Rótulo 'Status' encontrado, mas próximo <p> não contém status válido. Todos os <p>: {[p.get_text(strip=True) for p in element.find_all('p')]}")
+
+                    # Log de depuração se nem data nem status forem encontrados
+                    if not data_label and not status_label and last_auto:
+                        print(f"⚠️ Nem 'Data da Infração' nem 'Status' encontrados no container col-12 col-lg-9. Todos os <p>: {[p.get_text(strip=True) for p in element.find_all('p')]}")
+
+            # Salva os dados da última placa
+            if current_placa:
+                if autos_de_infracao:
+                    print(f"✅ Encontrados {len(autos_de_infracao)} autos de infração para a placa {current_placa}.")
+                    for auto, data, status in autos_de_infracao:
+                        data_to_save.append({
+                            "Site": site_name,
+                            "Placa": current_placa,
+                            "Auto de Infração": auto,
+                            "Data da Infração": data,
+                            "Status": status
+                        })
+                else:
+                    print(f"⚠️ Nenhum auto de infração encontrado para a placa {current_placa}.")
+                    data_to_save.append({
+                        "Site": site_name,
+                        "Placa": current_placa,
+                        "Auto de Infração": "Nenhum",
+                        "Data da Infração": "Nenhuma",
+                        "Status": "Nenhum"
+                    })
+
+        except Exception as e:
+            print("❌ Erro ao extrair os dados do site:", e)
+            return data_to_save
+
+        finally:
+            # Fecha o navegador
+            try:
+                driver.quit()
+                print("✅ Navegador fechado.")
+            except Exception as e:
+                print("⚠️ Erro ao fechar o navegador:", e)
+            finally:
+                # Remove explicitamente a referência ao driver e força a coleta de lixo
+                del driver
+                import gc
+                gc.collect()
+                
+        return data_to_save
+    except Exception as e:
+                print("⚠️ Erro ao abrir o site:", e)
+
+# === PROCESSA TODOS OS SITES ===
+all_data = []
+
+for url, site_name in SITES.items():
+    site_data = processar_site(url, site_name, LOGIN, SENHA)
+    all_data.extend(site_data)
+
+# === SALVA TODOS OS DADOS EM UM ÚNICO CSV ===
+if not all_data:
+    print("❌ Nenhum dado foi extraído de nenhum site.")
+else:
+    with open('infracoes.csv', 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ["Site", "Placa", "Auto de Infração", "Data da Infração", "Status"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in all_data:
+            writer.writerow(row)
+    print(f"✅ Dados de todos os sites salvos em 'infracoes.csv'. Total de linhas: {len(all_data)}.")
